@@ -1,0 +1,224 @@
+﻿@model List<map.Models.InstituteLocation>
+@using Newtonsoft.Json
+
+@{
+    Layout = null;
+}
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Institute Map with Voice + Clustering</title>
+
+    <!-- Leaflet Core -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <!-- Leaflet Routing Machine -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.min.js"></script>
+
+    <!-- Marker Cluster -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+    <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+
+    <!-- Fuzzy Search -->
+    <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
+    <script type="text/javascript" src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
+    <style>
+        #map {
+            height: 95vh;
+            width: 100%;
+        }
+
+        .control-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 999;
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 0 8px rgba(0,0,0,0.2);
+        }
+
+        .suggestion-item {
+            cursor: pointer;
+            padding: 5px;
+            border-bottom: 1px solid #ccc;
+        }
+
+            .suggestion-item:hover {
+                background-color: #f0f0f0;
+            }
+
+        button {
+            padding: 6px 12px;
+            margin: 5px 0;
+            cursor: pointer;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <div class="control-panel">
+        <button onclick="startListening()">🎙 Speak Institute Name</button>
+        <button onclick="resetZoom()">🔄 Reset Zoom</button>
+        <div id="google_translate_element"></div>
+
+        <div id="spokenText">🎧 Waiting for input...</div>
+        <div id="suggestions"></div>
+    </div>
+
+    <script>
+    const allLocations = @Html.Raw(JsonConvert.SerializeObject(Model));
+    let routeControl = null;
+    let markers = [];
+
+    const map = L.map('map').setView([20.5937, 78.9629], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371; // Radius of the Earth in km
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return (R * c).toFixed(2); // in kilometers
+    }
+
+    // Marker Cluster Setup
+    const markerCluster = L.markerClusterGroup();
+    allLocations.forEach(inst => {
+        if (!inst.Latitude || !inst.Longitude) return;
+        const distance = calculateDistance(28.58707794829337, 77.23083185105683, inst.Latitude, inst.Longitude);
+        const marker = L.marker([inst.Latitude, inst.Longitude])
+            .bindPopup(`<b>${inst.InstName}</b><br>${inst.InstAddress}<br><b>Accredited Score:</b> ${inst.AccCount}<br><b>Distance from NBA Office:</b> ${distance} km <button onclick="drawRoute(${inst.Latitude}, ${inst.Longitude})">🛣 Show Route</button>`);
+        markerCluster.addLayer(marker);
+    });
+    map.addLayer(markerCluster);
+    map.fitBounds(markerCluster.getBounds());
+
+    function resetZoom() {
+        map.fitBounds(markerCluster.getBounds());
+    }
+
+    const fuse = new Fuse(allLocations, { keys: ['InstName'], threshold: 0.4 });
+
+    function normalize(text) {
+        return text.toLowerCase().replace(/[^a-z0-9 ]/gi, '').replace(/\s+/g, ' ').trim();
+    }
+
+    function startListening() {
+        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+        recognition.lang = 'en-IN';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+        recognition.start();
+
+        recognition.onresult = (event) => {
+            const spokenText = event.results[0][0].transcript.trim();
+            document.getElementById("spokenText").textContent = "🎤 You said: " + spokenText;
+            findAndSuggestInstitutes(normalize(spokenText));
+        };
+
+        recognition.onerror = (event) => {
+            alert("Speech error: " + event.error);
+        };
+    }
+
+    function findAndSuggestInstitutes(spokenName) {
+        const results = fuse.search(spokenName).slice(0, 10);
+        const suggestions = document.getElementById("suggestions");
+        suggestions.innerHTML = "";
+
+        if (results.length === 0) {
+            suggestions.innerHTML = `<div class='suggestion-item'>❌ No matches found</div>`;
+            return;
+        }
+
+        results.forEach(result => {
+            const item = document.createElement("div");
+            item.className = "suggestion-item";
+            item.textContent = result.item.InstName;
+            item.onclick = () => {
+                focusOnInstitute(result.item);
+                suggestions.innerHTML = "";
+            };
+            suggestions.appendChild(item);
+        });
+    }
+
+    function focusOnInstitute(inst) {
+        const distance = calculateDistance(28.58707794829337, 77.23083185105683, inst.Latitude, inst.Longitude);
+
+        // Clear old markers
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+
+        // Clear old route if any
+        if (routeControl) {
+            map.removeControl(routeControl);
+            routeControl = null;
+        }
+
+        const marker = L.marker([inst.Latitude, inst.Longitude]).addTo(map);
+        markers.push(marker);
+
+        const popupContent = `
+            <b>${inst.InstName}</b><br>
+            ${inst.InstAddress}<br>
+            <b>Accredited Score:</b> ${inst.AccCount}<br>
+            <b>Distance from NBA Office:</b> ${distance} km<br>
+            <button onclick="drawRoute(${inst.Latitude}, ${inst.Longitude})">🛣 Show Route</button>
+        `;
+
+        marker.bindPopup(popupContent).openPopup();
+        map.setView([inst.Latitude, inst.Longitude], 15);
+    }
+
+    function drawRoute(destLat, destLng) {
+        const refLat = 28.58707794829337;
+        const refLng = 77.23083185105683;
+
+        if (routeControl) {
+            map.removeControl(routeControl);
+        }
+
+        routeControl = L.Routing.control({
+            waypoints: [
+                L.latLng(refLat, refLng),
+                L.latLng(destLat, destLng)
+            ],
+            routeWhileDragging: false,
+            draggableWaypoints: false,
+            addWaypoints: false,
+            createMarker: () => null,
+            show: false
+        }).addTo(map);
+    }
+    </script>
+
+    <script type="text/javascript">
+        function googleTranslateElementInit() {
+            new google.translate.TranslateElement({
+                pageLanguage: 'en',
+                includedLanguages: 'hi,ta,te,ml,bn,gu,kn,mr,pa,ur,en', // Indian languages + English
+                layout: google.translate.TranslateElement.InlineLayout.SIMPLE
+            }, 'google_translate_element');
+        }
+    </script>
+
+
+</body>
+</html>
